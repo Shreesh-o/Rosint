@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useMemo, useRef, Component } from "re
 import { normalizeUsername } from "./normalizeUsername.js";
 import { dynamicallyBlocked } from "./blocklist.js";
 import { createPostLookup, fetchWithBackoff } from "./postLookup.js";
+import { TrackedUsers, TrackToggle } from "./components/TrackedUsers.jsx";
 
 // ─── API Config ───────────────────────────────────────────────────────────────
 
@@ -2422,6 +2423,7 @@ export default function App() {
                                 {initialLoading && "Searching…"}
                             </button>
                         </form>
+                        <TrackedUsers onSelectUser={searchUser} />
                     </div>
 
                     {!searched && (
@@ -2527,6 +2529,7 @@ export default function App() {
                                 <div className="text-[12px] text-[#818384]">
                                     <p>
                                         Results for <span className="text-[#ff4500] font-medium">u/{query}</span>
+                                        {!searchBlocked && <TrackToggle username={query} searchBlocked={searchBlocked} />}
                                         {allSources.length > 0 && (
                                             <> · {allSources.map((src, i) => {
                                                 const url = src === "Arctic Shift"

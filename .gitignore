@@ -27,6 +27,9 @@ names.txt
 *.names.txt
 requests/
 
+# Local tracked users data
+data/
+
 # Local Claude Code state: worktrees are embedded git repos, and launch.json
 # holds machine-specific paths. Nothing here belongs in the repo.
 .claude/
