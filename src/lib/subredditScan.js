@@ -1,7 +1,7 @@
 import { normalizeUsername } from "../normalizeUsername.js";
 import { dynamicallyBlocked as defaultDynamicallyBlocked } from "../blocklist.js";
+import { fetchWithBackoff } from "../postLookup.js";
 import { getStatus as defaultGetStatus } from "./postMedia.js";
-import { safeArchiveFetch, resolveArchiveStatus } from "./archiveStatus.js";
 
 // ─── Archive API Constants ───────────────────────────────────────────────────
 
@@ -102,7 +102,21 @@ export async function checkAuthorsBlocked(authors, {
 
 // ─── Archive Page Fetching ────────────────────────────────────────────────────
 
-export const safeFetch = safeArchiveFetch;
+export async function safeFetch(url, { retry = true, onRetry, fetcher } = {}) {
+    const res = await fetchWithBackoff(url, {
+        init: { headers: { Accept: "application/json" } },
+        retries: retry ? undefined : 0,
+        fetcher,
+        onRetry,
+    });
+    if (!res) return { data: [], ok: false, status: 0 };
+    try {
+        const json = await res.json();
+        return { data: Array.isArray(json?.data) ? json.data : [], ok: true, status: res.status };
+    } catch {
+        return { data: [], ok: false, status: res.status };
+    }
+}
 
 export function buildSubredditUrls({ subreddit, cursor, filters = {} }) {
     const cleanSub = subreddit.replace(/^r\//i, "").trim();
@@ -174,14 +188,11 @@ export async function defaultFetchPage({ subreddit, cursor, filters = {}, fetche
 
     merged.sort((a, b) => (b.created_utc || 0) - (a.created_utc || 0));
 
-    const archiveStatus = resolveArchiveStatus(arcticRes, pullpushRes);
     const ok = arcticRes.ok || pullpushRes.ok;
     return {
         items: merged,
         ok,
         keywordFallbackUsed,
-        archiveStatus,
-        error: !ok ? "Stopped early: archives not responding" : null,
     };
 }
 
@@ -257,8 +268,13 @@ export async function scanSubreddit({
         const isOk = Array.isArray(pageRes) ? true : Boolean(pageRes?.ok);
 
         if (!isOk) {
-            const err = pageRes?.error || (pageRes?.errors && pageRes.errors[0]) || "Stopped early: archives not responding";
-            errors.push(err);
+            if (pageRes?.error) {
+                errors.push(pageRes.error);
+            } else if (pageRes?.errors && Array.isArray(pageRes.errors)) {
+                errors.push(...pageRes.errors);
+            } else {
+                errors.push("Failed to fetch archive page");
+            }
             break;
         }
 

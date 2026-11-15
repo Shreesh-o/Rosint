@@ -365,13 +365,12 @@ export async function loadProfileWithCache({
     setInitialLoading,
     setCacheInfo,
     setRefreshing,
-    cache = defaultCache,
 }) {
     setInitialLoading(true);
 
     // CRITICAL: Blocklist check MUST run BEFORE any cache read
     if (await isBlockedUser(username)) {
-        await cache.remove(username);
+        await deleteCachedProfile(username);
         await runDecoySearch();
         return;
     }
@@ -381,7 +380,7 @@ export async function loadProfileWithCache({
     // Try cache hit
     if (!forceRefresh && !hasFilters) {
         try {
-            const cached = await cache.get(username);
+            const cached = await getCachedProfile(username);
             if (cached && cached.posts && cached.comments && (cached.posts.items.length > 0 || cached.comments.items.length > 0)) {
                 // Instantly render cached data
                 posts.hydrate(cached.posts);
@@ -396,19 +395,9 @@ export async function loadProfileWithCache({
                     comments.reset(username, filters, { mergeWith: cached.comments.items }),
                 ]).then(([freshPosts, freshComments]) => {
                     setRefreshing(false);
-                    const postsDown = posts?.archiveState === "down";
-                    const commentsDown = comments?.archiveState === "down";
-                    if (postsDown || commentsDown) {
-                        setCacheInfo({
-                            isCached: true,
-                            savedAt: cached.savedAt,
-                            error: "Cached · couldn't refresh, archives unreachable",
-                        });
-                        return;
-                    }
                     if (freshPosts && freshComments) {
                         const nowMs = Date.now();
-                        cache.set(username, {
+                        saveCachedProfileDebounced(username, {
                             posts: { items: freshPosts, sources: posts.sources, pageStack: posts.pageStack },
                             comments: { items: freshComments, sources: comments.sources, pageStack: comments.pageStack },
                             savedAt: nowMs,
@@ -417,11 +406,6 @@ export async function loadProfileWithCache({
                     }
                 }).catch(() => {
                     setRefreshing(false);
-                    setCacheInfo({
-                        isCached: true,
-                        savedAt: cached.savedAt,
-                        error: "Cached · couldn't refresh, archives unreachable",
-                    });
                 });
                 return;
             }
@@ -440,9 +424,8 @@ export async function loadProfileWithCache({
             posts.reset(username, filters),
             comments.reset(username, filters),
         ]);
-        const isOutage = posts?.archiveState === "down" && comments?.archiveState === "down";
-        if (!hasFilters && freshPosts && freshComments && !isOutage) {
-            cache.set(username, {
+        if (!hasFilters && freshPosts && freshComments) {
+            saveCachedProfileDebounced(username, {
                 posts: { items: freshPosts, sources: posts.sources, pageStack: posts.pageStack },
                 comments: { items: freshComments, sources: comments.sources, pageStack: comments.pageStack },
                 savedAt: Date.now(),
