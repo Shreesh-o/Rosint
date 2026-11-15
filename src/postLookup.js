@@ -36,19 +36,24 @@ export async function fetchWithBackoff(url, {
     now = Date.now,
     random = Math.random,
     onRetry,
+    onFailure,
 } = {}) {
     for (let attempt = 0; ; attempt++) {
         let res = null;
+        let lastErr = null;
         try {
             res = await fetcher(url, init);
-        } catch { /* network error - retryable */ }
+        } catch (err) {
+            lastErr = err;
+        }
         if (res?.ok) return res;
+        onFailure?.({ status: res?.status ?? null, error: lastErr, response: res, attempt });
         if (res && res.status !== 429 && res.status < 500) return null;
         if (attempt >= retries) return null;
         const delay = retryAfterMs(res, now) ?? backoffDelayMs(attempt, random);
         if (delay > MAX_RETRY_AFTER_MS) return null;
         await wait(delay);
-        onRetry?.(attempt + 1);
+        onRetry?.(attempt + 1, { status: res?.status ?? null });
     }
 }
 

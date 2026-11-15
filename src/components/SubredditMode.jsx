@@ -313,7 +313,7 @@ export function SubredditMode({
                         onClick={() => executeScan({ reset: false, cursor: nextCursor })}
                         className="text-white underline hover:no-underline font-medium text-[11px]"
                     >
-                        Retry
+                        Keep scanning
                     </button>
                 </div>
             )}
@@ -331,7 +331,7 @@ export function SubredditMode({
                         </CardBoundary>
                     ))}
                 </div>
-            ) : !scanning && (
+            ) : !scanning && !error && (
                 <div className="text-center py-16 px-4 bg-[#141415] border border-[#222] rounded-lg mt-2">
                     <p className="text-white font-medium text-sm">
                         No deleted or removed posts found in the scanned range.

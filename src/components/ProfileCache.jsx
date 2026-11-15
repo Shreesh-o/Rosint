@@ -9,10 +9,16 @@ export function CacheBanner({ cacheInfo, onRefresh, refreshing }) {
     return (
         <div className="flex items-center justify-between gap-2 px-3 py-1.5 mb-3 rounded bg-[#1a1a1b] border border-[#343536] text-[11px] text-[#818384]">
             <span className="flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#ff4500]" />
+                <span className={`w-1.5 h-1.5 rounded-full ${cacheInfo.error ? 'bg-amber-400' : 'bg-[#ff4500]'}`} />
                 <span>
-                    Cached · {timeStr}
-                    {refreshing && <span className="text-[#d7dadc]"> · Refreshing…</span>}
+                    {cacheInfo.error ? (
+                        <span className="text-amber-300 font-medium">{cacheInfo.error}</span>
+                    ) : (
+                        <>
+                            Cached · {timeStr}
+                            {refreshing && <span className="text-[#d7dadc]"> · Refreshing…</span>}
+                        </>
+                    )}
                 </span>
             </span>
             <button

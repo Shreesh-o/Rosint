@@ -7,7 +7,7 @@ Rosint is a client-side Reddit intelligence tool that queries independent public
 - **Runtime:** Node.js ≥ 24 (`v26.13.1` verified)
 - **Install:** `npm ci` (configured with `.npmrc` `legacy-peer-deps=true`)
 - **Dev Server:** `npm run dev` (starts Vite on `http://localhost:5173`)
-- **Test:** `npm test` (`node --test tests/*.test.mjs` — 82 unit tests)
+- **Test:** `npm test` (`node --test tests/*.test.mjs` — 99 unit tests)
 - **Lint:** `npm run lint` (`eslint .` — 0 errors, 1 known warning)
 - **Build:** `npm run build` (Vite production build to `dist/`)
 - **Preview:** `npm run preview` (previews `dist/`)
@@ -31,7 +31,9 @@ Rosint/
 │   │   ├── trackedUsers.js  # Tracked users helpers (loadTracked, saveTracked, addUser, removeUser)
 │   │   ├── profileCache.js  # Stale-while-revalidate IndexedDB cache with LRU eviction and merge logic
 │   │   ├── dedupePosts.js   # Pure helper for post URL/media extraction and duplicate grouping
-│   │   └── postMedia.js     # Media detection (hasMedia, getPostMedia), cleanMediaUrl, and formatting helpers
+│   │   ├── postMedia.js     # Media detection (hasMedia, getPostMedia), cleanMediaUrl, and formatting helpers
+│   │   ├── archiveStatus.js # Error classification (timeout, rate_limited, server_error, bad_response) and status resolver
+│   │   └── subredditScan.js # Subreddit deleted/removed post scanner with author block filtering
 │   └── index.css            # Tailwind directives
 ├── worker/
 │   └── index.js             # Cloudflare Worker handler: redirects /admin and /removal, proxies /api/config & /api/blocklist
@@ -42,6 +44,7 @@ Rosint/
 │   ├── removal-reply.mjs    # CLI: Generates removal confirmation email template
 │   └── lib/archive.mjs      # Shared CLI archive fetcher, summary aggregator, and content sampler
 ├── tests/
+│   ├── archive-status.test.mjs # Unit tests for error classification, resolveArchiveStatus, and outage safety
 │   ├── backoff.test.mjs     # Unit tests for fetchWithBackoff, backoffDelayMs, and retryAfterMs
 │   ├── post-lookup.test.mjs # Unit tests for createPostLookup batching, deduplication, and caching
 │   ├── search-service.test.mjs # Unit tests for createBlocklistClient and Worker proxy handler
@@ -124,3 +127,23 @@ Before submitting changes:
 - **Scan Cap & Cursor:** Scans up to `maxPages` (default 5, 100 posts/page) or until `targetCount` (default 25) deleted/removed items are collected, with a 250ms throttle between pages. `nextCursor` is derived from the oldest `created_utc` seen on each raw page so pagination continues seamlessly without skipping posts. Users continue scanning with the "Keep scanning" button.
 - **Safety Guard:** `scanSubreddit` strictly refuses to run unless a working author-block checker is supplied (`isBlockedAuthor` or both a non-empty `blockedHashes` array and `dynamicallyBlocked`); there is no permissive default.
 - **Blocklist Rule (Fail-Closed & Request Batching):** Batched author check computes SHA-256 hashes per page and checks static `BLOCKED_HASHES` and dynamic `dynamicallyBlocked`. When both `isBlockedAuthor` and (`blockedHashes` + `dynamicallyBlocked`) are supplied, `blockedHashes` + `dynamicallyBlocked` takes precedence: static hashes are checked in memory first, and all dynamic checks fire in the same microtick, ensuring at most 1 dynamic blocklist request per page. Blocked authors' posts are silently dropped before counting (`scannedCount` and `foundCount` exclude them) with zero hints or placeholders. Items with author `"[deleted]"` have no username and are kept. If the dynamic blocklist cannot be reached (e.g. 503 or offline), the system fails closed and drops all real authors. Never reads or writes the profile cache and never offers tracking.
+
+### 6. Archive Outage Detection & Explicit Failure States
+- **Files:** `src/lib/archiveStatus.js`, `tests/archive-status.test.mjs`
+- **Purpose:** Differentiates genuine "no posts found" empty states from public archive outages, rate limits, timeouts, and network failures.
+- **Key Functions:** `classifyError`, `resolveArchiveStatus`, `safeArchiveFetch`, `combineArchiveResponses`.
+- **Failure Classification:** Maps HTTP status codes, network errors, and JSON syntax failures to one of:
+  - `"timeout"` (AbortError, TimeoutError, or timeout message)
+  - `"rate_limited"` (HTTP 429)
+  - `"server_error"` (HTTP 5xx or general fetch exceptions)
+  - `"bad_response"` (HTTP 4xx non-429 or malformed non-JSON response)
+- **Multi-Archive Resolution:**
+  - `ok`: Both archives responded successfully.
+  - `partial`: One archive failed while the other responded. UI shows available items with a muted notice: `"Results may be incomplete: one archive didn't respond."`
+  - `down`: Both archives failed. UI renders the outage notice with DinoGame and Retry button: `"The public archives aren't responding right now, so this isn't a "no results" answer. Try again in a few minutes."`
+- **Key Invariants:**
+  - An archive answering with zero items (`ok: true, data: []`) is NOT an outage. Genuine "No posts found" empty state appears ONLY when at least one archive answered successfully with zero items.
+  - Outage responses are never saved to the profile cache, and background refresh failures preserve existing cached data with a banner update: `"Cached · couldn't refresh, archives unreachable"`.
+  - Pagination failures do not blank existing rendered items; they show an inline error with a Retry button.
+  - **Privacy Invariant:** Blocked accounts always run `runDecoySearch` first and render as empty decoy results without querying archives. They never see outage screens, retry controls, or error banners. Subreddit and removal-service blocklist failures fail closed silently and are never presented as archive outages.
+

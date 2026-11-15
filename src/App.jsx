@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo, useRef, Component } from "react";
 import { normalizeUsername } from "./normalizeUsername.js";
 import { dynamicallyBlocked } from "./blocklist.js";
-import { createPostLookup, fetchWithBackoff } from "./postLookup.js";
+import { createPostLookup } from "./postLookup.js";
 import { TrackedUsers, TrackToggle } from "./components/TrackedUsers.jsx";
 import { mergeItemsById, loadProfileWithCache } from "./lib/profileCache.js";
 import { CacheBanner, ClearCacheButton } from "./components/ProfileCache.jsx";
@@ -19,6 +19,7 @@ import {
 } from "./lib/postMedia.js";
 import { MediaPostCard } from "./components/MediaPostCard.jsx";
 import { SubredditMode } from "./components/SubredditMode.jsx";
+import { safeArchiveFetch, combineArchiveResponses } from "./lib/archiveStatus.js";
 
 // ─── API Config ───────────────────────────────────────────────────────────────
 
@@ -365,25 +366,7 @@ function getCommentImage(comment) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Retries with exponential backoff (see fetchWithBackoff), but only for
-// failures that can plausibly clear on their own: 429 rate limits, 5xx, and
-// network errors. Deterministic 4xx (404s, Arctic's 422 keyword rejection for
-// very active users) fail fast so fetchBoth can degrade to PullPush
-// immediately instead of stalling behind doomed retries.
-async function safeFetch(url, { retry = true, onRetry } = {}) {
-    const res = await fetchWithBackoff(url, {
-        init: { headers: { Accept: "application/json" } },
-        retries: retry ? undefined : 0,
-        onRetry,
-    });
-    if (!res) return { data: [], ok: false };
-    try {
-        const json = await res.json();
-        return { data: json?.data ?? [], ok: true };
-    } catch {
-        return { data: [], ok: false };
-    }
-}
+const safeFetch = safeArchiveFetch;
 
 async function fetchTimeSeries(key, { precision = "hour", hours = 24 } = {}) {
     const before = Date.now();
@@ -472,26 +455,18 @@ function ratioSeries(numeratorSeries, denominatorSeries) {
 
 async function fetchBoth(username, type, pagination = {}, dateFilters = {}, { onRetry } = {}) {
     // Recheck on pagination too; a removal may have been approved since search.
-    if (await isBlockedUser(username)) return { items: [], sources: [], arcticDown: false };
+    if (await isBlockedUser(username)) {
+        return { items: [], sources: [], arcticDown: false, archiveStatus: "ok", partial: false, rateLimited: false, down: false };
+    }
     const { arctic, pullpush } = buildUrls(username, type, pagination, dateFilters);
     const [arcticRes, pullpushRes] = await Promise.all([
         safeFetch(arctic, { onRetry }),
         safeFetch(pullpush, { onRetry }),
     ]);
 
-    const seen = new Set();
-    const merged = [];
-    const sources = [];
-
-    if (arcticRes.ok && arcticRes.data.length > 0) sources.push("Arctic Shift");
-    if (pullpushRes.ok && pullpushRes.data.length > 0) sources.push("PullPush");
-
-    [...arcticRes.data, ...pullpushRes.data].forEach((item) => {
-        if (item.id && !seen.has(item.id)) {
-            seen.add(item.id);
-            merged.push(item);
-        }
-    });
+    const combined = combineArchiveResponses(arcticRes, pullpushRes);
+    const { archiveStatus, sources } = combined;
+    const merged = combined.items;
 
     // PullPush ignores the over_18 param, so filter NSFW client-side (posts only;
     // comments have no over_18 field). Arctic results already match — harmless here.
@@ -512,7 +487,16 @@ async function fetchBoth(username, type, pagination = {}, dateFilters = {}, { on
     result.sort((a, b) => b.created_utc - a.created_utc);
     // A failed keyword search on Arctic (rejected for very active users) is
     // not an outage — degrade to PullPush-only instead of the maintenance screen.
-    return { items: result, sources, arcticDown: !arcticRes.ok && !dateFilters.keywords };
+    const effectiveArcticDown = !arcticRes.ok && !dateFilters.keywords;
+    return {
+        items: result,
+        sources,
+        archiveStatus: archiveStatus.state,
+        arcticDown: effectiveArcticDown,
+        down: archiveStatus.down,
+        partial: archiveStatus.partial,
+        rateLimited: archiveStatus.rateLimited,
+    };
 }
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
@@ -1699,6 +1683,11 @@ function usePaginatedFetch(type) {
     const [pageStack, setPageStack] = useState([]);
     const [storedFilters, setStoredFilters] = useState({});
     const [arcticDown, setArcticDown] = useState(false);
+    const [archiveState, setArchiveState] = useState("ok");
+    const [partial, setPartial] = useState(false);
+    const [rateLimited, setRateLimited] = useState(false);
+    const [isRetryingRateLimit, setIsRetryingRateLimit] = useState(false);
+    const [paginationError, setPaginationError] = useState(null);
     // True once safeFetch has started retrying the current request.
     const [retrying, setRetrying] = useState(false);
 
@@ -1710,19 +1699,56 @@ function usePaginatedFetch(type) {
 
     const _fetch = useCallback(async (username, pagination, filters) => {
         const seq = ++seqRef.current;
+        const isPagination = Boolean(pagination && (pagination.before || pagination.after));
         setLoading(true);
         setRetrying(false);
+        setIsRetryingRateLimit(false);
         setError(null);
-        const onRetry = () => { if (seq === seqRef.current) setRetrying(true); };
+        if (!isPagination) {
+            setPaginationError(null);
+        }
+        const onRetry = (_attempt, info) => {
+            if (seq === seqRef.current) {
+                setRetrying(true);
+                if (info?.status === 429) {
+                    setIsRetryingRateLimit(true);
+                }
+            }
+        };
         try {
-            const { items: data, sources: srcs, arcticDown: down } = await fetchBoth(username, type, pagination, filters, { onRetry });
+            const {
+                items: data,
+                sources: srcs,
+                arcticDown: down,
+                archiveStatus: status,
+                partial: isPart,
+                rateLimited: isRateLimited,
+            } = await fetchBoth(username, type, pagination, filters, { onRetry });
+
             if (seq !== seqRef.current) return null; // superseded by a newer request
+
+            if (isPagination && status === "down") {
+                setPaginationError("Failed to load next page: archives not responding");
+                setArchiveState(status);
+                setPartial(isPart);
+                setRateLimited(isRateLimited);
+                return null;
+            }
+
+            setPaginationError(null);
             setItems(data);
             setSources(srcs);
             setArcticDown(down);
+            setArchiveState(status);
+            setPartial(isPart);
+            setRateLimited(isRateLimited);
             return data;
         } catch (err) {
             if (seq !== seqRef.current) return null;
+            if (isPagination) {
+                setPaginationError(err.message || "Failed to load page");
+                return null;
+            }
             setError(err.message);
             setItems([]);
             return [];
@@ -1763,6 +1789,11 @@ function usePaginatedFetch(type) {
         }
         setPage(1);
         setError(null);
+        setArchiveState("ok");
+        setPartial(false);
+        setRateLimited(false);
+        setIsRetryingRateLimit(false);
+        setPaginationError(null);
     }, []);
 
     const goNext = useCallback(async (username) => {
@@ -1803,9 +1834,33 @@ function usePaginatedFetch(type) {
         setPageStack([]);
         setStoredFilters({});
         setArcticDown(false);
+        setArchiveState("ok");
+        setPartial(false);
+        setRateLimited(false);
+        setIsRetryingRateLimit(false);
+        setPaginationError(null);
     }, []);
 
-    return { items, sources, loading, retrying, error, page, pageStack, arcticDown, reset, clear, goNext, goPrev, hydrate };
+    return {
+        items,
+        sources,
+        loading,
+        retrying,
+        isRetryingRateLimit,
+        error,
+        page,
+        pageStack,
+        arcticDown,
+        archiveState,
+        partial,
+        rateLimited,
+        paginationError,
+        reset,
+        clear,
+        goNext,
+        goPrev,
+        hydrate,
+    };
 }
 
 // ─── Dino Game (shown during maintenance) ──────────────────────────────────────
@@ -2153,7 +2208,9 @@ export default function App() {
         return hideDuplicates ? groupDuplicates(posts.items) : { visible: posts.items, hiddenCount: 0, groups: {} };
     }, [posts.items, hideDuplicates]);
 
-    const arcticIsDown = dinoForced || posts.arcticDown || comments.arcticDown;
+    const isOutage = dinoForced || (posts.archiveState === "down" && comments.archiveState === "down") || (active.archiveState === "down" && active.items.length === 0);
+    const isPartial = !isOutage && Boolean(active.partial || posts.partial || comments.partial);
+    const arcticIsDown = isOutage;
 
     // Outage state comes only from real searches. There is deliberately no
     // health ping on page load: it spent one of each visitor's Arctic Shift
@@ -2668,14 +2725,14 @@ export default function App() {
                     so they look like any other account the archives have nothing
                     for. See runDecoySearch. */}
 
-                {searched && resultsMode === "user" && !searchBlocked && arcticIsDown && (
+                {searched && resultsMode === "user" && !searchBlocked && isOutage && (
                     <div className="max-w-md mx-auto px-4 mt-12 pb-16">
                         <div className="border border-[#3a3320] bg-[#1a1a1b] rounded-xl px-7 pt-10 pb-5 text-center shadow-lg shadow-black/30">
                             <p className="text-[#f3f4f3] text-lg font-semibold mb-2">
-                                Sorry about that!
+                                The public archives aren&apos;t responding right now
                             </p>
                             <p className="text-[#a8a8a9] text-sm leading-relaxed">
-                                The archive we search is busy right now. Please try again in a few seconds. If the error persists, it may be down for a couple of hours.
+                                The public archives aren&apos;t responding right now, so this isn&apos;t a &quot;no results&quot; answer. Try again in a few minutes.
                             </p>
                             <DinoGame />
                             <button
@@ -2683,7 +2740,7 @@ export default function App() {
                                 disabled={initialLoading}
                                 className="mt-4 px-4 py-2 rounded-md bg-[#ff4500] hover:bg-[#fe5301] text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                             >
-                                {initialLoading ? "Retrying…" : "Try again"}
+                                {initialLoading ? "Retrying…" : "Retry"}
                             </button>
                         </div>
                     </div>
@@ -2724,6 +2781,11 @@ export default function App() {
                                     </p>
                                     {appliedSubreddit && (
                                         <p className="text-[#818384] mt-0.5">in <span className="text-[#ff4500] font-medium">r/{appliedSubreddit}</span></p>
+                                    )}
+                                    {!searchBlocked && isPartial && (
+                                        <p className="text-[11px] text-[#818384] mt-1">
+                                            Results may be incomplete: one archive didn&apos;t respond.
+                                        </p>
                                     )}
                                 </div>
                                 <button
@@ -2864,7 +2926,11 @@ export default function App() {
                                 <div className="flex flex-col">
                                     <span className="text-sm">Fetching from Arctic Shift + PullPush…</span>
                                     {(active.retrying || (initialLoading && (posts.retrying || comments.retrying))) && (
-                                        <span className="text-xs">Still trying, the server is busy...</span>
+                                        <span className="text-xs">
+                                            {(active.isRetryingRateLimit || posts.isRetryingRateLimit || comments.isRetryingRateLimit)
+                                                ? "rate limited, retrying…"
+                                                : "Still trying, the server is busy..."}
+                                        </span>
                                     )}
                                 </div>
                             </div>
@@ -2897,6 +2963,18 @@ export default function App() {
                                             </CardBoundary>
                                         ))}
                                 </div>
+                                {active.paginationError && (
+                                    <div className="flex items-center justify-between bg-[#1a1a1b] border border-[#ff4500]/40 rounded px-3 py-2 text-xs text-[#d7dadc] my-2">
+                                        <span>Archives not responding: couldn&apos;t load next page.</span>
+                                        <button
+                                            type="button"
+                                            onClick={() => active.goNext(query)}
+                                            className="text-[#ff4500] hover:underline font-medium ml-2"
+                                        >
+                                            Retry
+                                        </button>
+                                    </div>
+                                )}
                                 <Pagination
                                     page={active.page}
                                     hasPrev={active.page > 1}
