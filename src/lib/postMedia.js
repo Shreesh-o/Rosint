@@ -281,24 +281,6 @@ export function isAllowedPlaceholderHost(url) {
 }
 
 /**
- * Checks if a URL points to an imgur domain (e.g. imgur.com, i.imgur.com).
- *
- * @param {string} url
- * @returns {boolean}
- */
-export function isImgurHost(url) {
-    if (!url || typeof url !== "string") return false;
-    try {
-        const target = url.startsWith("//") ? `https:${url}` : url;
-        const parsed = new URL(target);
-        const host = parsed.hostname.toLowerCase();
-        return host === "imgur.com" || host.endsWith(".imgur.com");
-    } catch {
-        return /(?:^|\/\/)(?:[a-z0-9-]+\.)?imgur\.com(?::\d+)?(?:\/|$)/i.test(url);
-    }
-}
-
-/**
  * Detects if an image matches a known "image deleted / removed" placeholder graphic
  * from an allow-listed image host (imgur, i.redd.it, preview.redd.it, external-preview.redd.it).
  *
@@ -318,9 +300,6 @@ export function isRemovedImagePlaceholder(params) {
         (size) => size.width === width && size.height === height
     );
 }
-
-// Thin alias for backwards compatibility
-export const isImgurRemovedPlaceholder = isRemovedImagePlaceholder;
 
 /**
  * Attempts to extract a Reddit-hosted backup image URL from the post preview data.

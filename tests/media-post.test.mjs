@@ -10,7 +10,6 @@ import {
     getStatus,
     statusBorder,
     isRemovedImagePlaceholder,
-    isImgurRemovedPlaceholder,
     getRecoveryUrl,
 } from "../src/lib/postMedia.js";
 
@@ -219,16 +218,6 @@ test("isRemovedImagePlaceholder: sizes 161x81 and 130x60 on each allowed host ->
             );
         }
     }
-
-    // Also verify thin alias isImgurRemovedPlaceholder
-    assert.equal(
-        isImgurRemovedPlaceholder({ url: "https://i.imgur.com/image.png", width: 161, height: 81 }),
-        true
-    );
-    assert.equal(
-        isImgurRemovedPlaceholder({ url: "https://i.redd.it/image.png", width: 130, height: 60 }),
-        true
-    );
 
     // 2. The same sizes on an unrelated host -> false
     const unrelatedHosts = [
