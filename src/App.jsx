@@ -18,6 +18,7 @@ import {
     statusBorderHover,
 } from "./lib/postMedia.js";
 import { MediaPostCard } from "./components/MediaPostCard.jsx";
+import { SubredditMode } from "./components/SubredditMode.jsx";
 
 // ─── API Config ───────────────────────────────────────────────────────────────
 
@@ -2075,14 +2076,32 @@ function DateRangeControl({ dateFrom, dateTo, setDateFrom, setDateTo }) {
     );
 }
 
+function isValidSubreddit(sub) {
+    if (!sub || typeof sub !== "string") return false;
+    const clean = sub.trim().replace(/^r\//i, "").trim();
+    return Boolean(clean && /^[A-Za-z0-9_]+$/.test(clean));
+}
+
 export default function App() {
-    const initialUser = useMemo(() => normalizeUsername(new URLSearchParams(window.location.search).get("u")), []);
+    const initialSubreddit = useMemo(() => {
+        const raw = new URLSearchParams(window.location.search).get("r");
+        return isValidSubreddit(raw) ? raw.trim().replace(/^r\//i, "").trim() : "";
+    }, []);
+    // If ?r is present and valid, ?r wins over ?u on initial load
+    const initialUser = useMemo(() => {
+        if (initialSubreddit) return "";
+        return normalizeUsername(new URLSearchParams(window.location.search).get("u"));
+    }, [initialSubreddit]);
+    const initialMode = initialSubreddit ? "subreddit" : "user";
+    const [inputMode, setInputMode] = useState(initialMode);
+    const [resultsMode, setResultsMode] = useState(initialMode);
+    const [subredditQuery, setSubredditQuery] = useState(initialSubreddit);
     const initialSearchStarted = useRef(false);
-    const [username, setUsername] = useState(initialUser);
+    const [username, setUsername] = useState(() => initialSubreddit || initialUser);
     const [query, setQuery] = useState(initialUser);
     const [activeTab, setActiveTab] = useState("posts");
     const [searched, setSearched] = useState(
-        () => !!initialUser || new URLSearchParams(window.location.search).has("dino")
+        () => !!initialUser || !!initialSubreddit || new URLSearchParams(window.location.search).has("dino")
     );
     const [initialLoading, setInitialLoading] = useState(!!initialUser);
     const [dateFrom, setDateFrom] = useState("");
@@ -2142,10 +2161,14 @@ export default function App() {
     // outage banner even when searches would have worked.
 
     useEffect(() => {
-        document.title = searched && query
-            ? `u/${query} – Rosint`
-            : "Rosint - View Deleted Reddit Posts, Comments & Private Profiles";
-    }, [searched, query]);
+        if (resultsMode === "subreddit" && searched && subredditQuery) {
+            document.title = `r/${subredditQuery} – Rosint`;
+        } else if (resultsMode === "user" && searched && query) {
+            document.title = `u/${query} – Rosint`;
+        } else {
+            document.title = "Rosint - View Deleted Reddit Posts, Comments & Private Profiles";
+        }
+    }, [resultsMode, searched, query, subredditQuery]);
 
     useEffect(() => {
         if (searched) return;
@@ -2209,8 +2232,11 @@ export default function App() {
         if (push) {
             const url = new URL(window.location.href);
             url.searchParams.set("u", user);
+            url.searchParams.delete("r");
             window.history.pushState({}, "", url);
         }
+        setInputMode("user");
+        setResultsMode("user");
         setUsername(user);
         setQuery(user);
         setSearched(true);
@@ -2232,19 +2258,64 @@ export default function App() {
         setAppliedSubreddit(subreddit.trim());
     }, [buildFilters, hasFilters, posts, comments, subreddit, runDecoySearch]);
 
+    const searchSubreddit = useCallback((rawSub, { push = true } = {}) => {
+        if (!isValidSubreddit(rawSub)) return;
+        const clean = rawSub.trim().replace(/^r\//i, "").trim();
+        if (push) {
+            const url = new URL(window.location.href);
+            url.searchParams.set("r", clean);
+            url.searchParams.delete("u");
+            window.history.pushState({}, "", url);
+        }
+        setInputMode("subreddit");
+        setResultsMode("subreddit");
+        setSubredditQuery(clean);
+        setUsername(clean);
+        setSearched(true);
+    }, []);
+
+    const handleModeSwitch = useCallback((newMode) => {
+        setInputMode(newMode);
+        if (newMode === "subreddit") {
+            setUsername(resultsMode === "subreddit" ? subredditQuery : "");
+        } else {
+            setUsername(resultsMode === "user" ? query : "");
+        }
+    }, [resultsMode, subredditQuery, query]);
+
     // Browser back/forward: re-run the search in the URL, or return to the landing page
     useEffect(() => {
         const onPop = () => {
-            const u = normalizeUsername(new URLSearchParams(window.location.search).get("u"));
-            if (u) {
-                searchUser(u, { push: false });
-            } else {
-                setSearched(false);
-                setUsername("");
-                setQuery("");
-                setCacheInfo(null);
-                setRefreshing(false);
+            const params = new URLSearchParams(window.location.search);
+            const r = params.get("r");
+            if (isValidSubreddit(r)) {
+                const cleanR = r.trim().replace(/^r\//i, "").trim();
+                // If ?r is present, ?r wins
+                setInputMode("subreddit");
+                setResultsMode("subreddit");
+                setSubredditQuery(cleanR);
+                setUsername(cleanR);
+                setSearched(true);
+                return;
             }
+            const u = params.get("u");
+            if (u) {
+                const norm = normalizeUsername(u);
+                if (norm) {
+                    setInputMode("user");
+                    setResultsMode("user");
+                    searchUser(norm, { push: false });
+                    return;
+                }
+            }
+            setSearched(false);
+            setInputMode("user");
+            setResultsMode("user");
+            setUsername("");
+            setQuery("");
+            setSubredditQuery("");
+            setCacheInfo(null);
+            setRefreshing(false);
         };
         window.addEventListener("popstate", onPop);
         return () => window.removeEventListener("popstate", onPop);
@@ -2252,10 +2323,14 @@ export default function App() {
 
     const handleSubmit = useCallback(async (e) => {
         e.preventDefault();
-        const user = username.trim();
-        if (!user) return;
-        await searchUser(user);
-    }, [username, searchUser]);
+        const val = username.trim();
+        if (!val) return;
+        if (inputMode === "subreddit") {
+            searchSubreddit(val);
+        } else {
+            await searchUser(val);
+        }
+    }, [username, inputMode, searchSubreddit, searchUser]);
 
     // Every path that can start an archive fetch has to consult the blocklist,
     // not just the two search entry points. Retry and Clear both take the name
@@ -2442,12 +2517,37 @@ export default function App() {
                                 <source srcSet="/rosintTitle.webp" type="image/webp" />
                                 <img src="/rosintTitle.png" alt="redditOSINT" width="578" height="284" fetchPriority="high" className="mx-auto mb-4" style={{ width: "578px", maxWidth: "90vw" }} />
                             </picture>
-                            <p className="text-sm text-[#cccccc]">Search any Reddit username to view their <u>deleted posts</u>, <u>removed comments</u>, and <u>private profiles</u>.</p>
+                            <p className="text-sm text-[#cccccc]">
+                                {inputMode === "subreddit"
+                                    ? "Search any subreddit to view its deleted posts and removed submissions."
+                                    : <>Search any Reddit username to view their <u>deleted posts</u>, <u>removed comments</u>, and <u>private profiles</u>.</>}
+                            </p>
                         </div>
                     )}
 
                     <div className="relative mx-auto" style={{ maxWidth: searched ? '100%' : '690px' }}>
-                        {!searched && (
+                        {/* User | Subreddit mode switch */}
+                        <div className="flex items-center gap-1 mb-2">
+                            <button
+                                type="button"
+                                onClick={() => handleModeSwitch("user")}
+                                className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                                    inputMode === "user" ? "bg-[#343536] text-white" : "text-[#818384] hover:text-[#d7dadc]"
+                                }`}
+                            >
+                                User
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => handleModeSwitch("subreddit")}
+                                className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                                    inputMode === "subreddit" ? "bg-[#343536] text-white" : "text-[#818384] hover:text-[#d7dadc]"
+                                }`}
+                            >
+                                Subreddit
+                            </button>
+                        </div>
+                        {!searched && inputMode === "user" && (
                             <div className="absolute right-full top-1/2 -translate-y-1/2 mr-4 hidden sm:block" style={{ whiteSpace: 'nowrap' }}>
                                 <button
                                     type="button"
@@ -2464,9 +2564,12 @@ export default function App() {
                         )}
                         <form onSubmit={handleSubmit} className="flex gap-2">
                             <div className="relative" style={{ flex: "1 1 0" }}>
-                                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[#cccccc] text-sm font-medium select-none">u/</span>
-                                <input aria-label="Reddit username" type="text" value={username} onChange={(e) => setUsername(e.target.value)}
-                                       placeholder="username"
+                                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[#cccccc] text-sm font-medium select-none">
+                                    {inputMode === "subreddit" ? "r/" : "u/"}
+                                </span>
+                                <input aria-label={inputMode === "subreddit" ? "Subreddit name" : "Reddit username"}
+                                       type="text" value={username} onChange={(e) => setUsername(e.target.value)}
+                                       placeholder={inputMode === "subreddit" ? "subreddit" : "username"}
                                        className="w-full bg-[#1a1a1b] border border-[#343536] rounded pl-8 pr-3 py-2.5 text-base sm:text-sm text-white placeholder-[#818384] focus:outline-none focus:border-[#ff4500] transition-colors"
                                        autoFocus />
                             </div>
@@ -2476,10 +2579,10 @@ export default function App() {
                                 {initialLoading && "Searching…"}
                             </button>
                         </form>
-                        <TrackedUsers onSelectUser={searchUser} />
+                        {inputMode === "user" && <TrackedUsers onSelectUser={searchUser} />}
                     </div>
 
-                    {!searched && (
+                    {!searched && inputMode === "user" && (
                         <div className="flex flex-wrap items-center gap-2 mt-3 mx-auto" style={{ maxWidth: '690px' }}>
                             <button
                                 type="button"
@@ -2547,14 +2650,25 @@ export default function App() {
                     )}
                 </div>
 
-                {!searched && showGraphs && <GlobalChartsPanel compact={showAdvancedFilters} />}
+                {!searched && inputMode === "user" && showGraphs && <GlobalChartsPanel compact={showAdvancedFilters} />}
+
+                {/* Subreddit Mode Results */}
+                {searched && resultsMode === "subreddit" && isValidSubreddit(subredditQuery) && (
+                    <SubredditMode
+                        subreddit={subredditQuery}
+                        blockedHashes={BLOCKED_HASHES}
+                        dynamicallyBlocked={dynamicallyBlocked}
+                        isBlockedAuthor={isBlockedUser}
+                        PostCard={PostCard}
+                    />
+                )}
 
                 {/* Blocked accounts deliberately have no screen of their own — they
                     fall through to the normal results path and land on EmptyState,
                     so they look like any other account the archives have nothing
                     for. See runDecoySearch. */}
 
-                {searched && !searchBlocked && arcticIsDown && (
+                {searched && resultsMode === "user" && !searchBlocked && arcticIsDown && (
                     <div className="max-w-md mx-auto px-4 mt-12 pb-16">
                         <div className="border border-[#3a3320] bg-[#1a1a1b] rounded-xl px-7 pt-10 pb-5 text-center shadow-lg shadow-black/30">
                             <p className="text-[#f3f4f3] text-lg font-semibold mb-2">
@@ -2575,7 +2689,7 @@ export default function App() {
                     </div>
                 )}
 
-                {searched && (searchBlocked || !arcticIsDown) && (
+                {searched && resultsMode === "user" && (searchBlocked || !arcticIsDown) && (
                     <div className="max-w-3xl mx-auto px-4 mt-4 pb-16">
                         {!initialLoading && (
                             <>
