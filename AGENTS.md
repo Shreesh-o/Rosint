@@ -7,7 +7,7 @@ Rosint is a client-side Reddit intelligence tool that queries independent public
 - **Runtime:** Node.js ≥ 24 (`v26.13.1` verified)
 - **Install:** `npm ci` (configured with `.npmrc` `legacy-peer-deps=true`)
 - **Dev Server:** `npm run dev` (starts Vite on `http://localhost:5173`)
-- **Test:** `npm test` (`node --test tests/*.test.mjs` — 37 unit tests)
+- **Test:** `npm test` (`node --test tests/*.test.mjs` — 54 unit tests)
 - **Lint:** `npm run lint` (`eslint .` — 0 errors, 1 known warning)
 - **Build:** `npm run build` (Vite production build to `dist/`)
 - **Preview:** `npm run preview` (previews `dist/`)
@@ -23,9 +23,13 @@ Rosint/
 │   ├── normalizeUsername.js # Cleans usernames (strips u/, URLs, @, slashes); shared by UI and CLI scripts
 │   ├── postLookup.js        # Batched & cached post ID queries (createPostLookup) and retry logic (fetchWithBackoff)
 │   ├── components/
-│   │   └── TrackedUsers.jsx # TrackedUsers list & TrackToggle button components
+│   │   ├── TrackedUsers.jsx # TrackedUsers list & TrackToggle button components
+│   │   ├── ProfileCache.jsx # CacheBanner & ClearCacheButton components
+│   │   └── DedupeToggle.jsx # DedupeToggle component for duplicate post filtering
 │   ├── lib/
-│   │   └── trackedUsers.js  # Tracked users helpers (loadTracked, saveTracked, addUser, removeUser)
+│   │   ├── trackedUsers.js  # Tracked users helpers (loadTracked, saveTracked, addUser, removeUser)
+│   │   ├── profileCache.js  # Stale-while-revalidate IndexedDB cache with LRU eviction and merge logic
+│   │   └── dedupePosts.js   # Pure helper for post URL/media extraction and duplicate grouping
 │   └── index.css            # Tailwind directives
 ├── worker/
 │   └── index.js             # Cloudflare Worker handler: redirects /admin and /removal, proxies /api/config & /api/blocklist
@@ -39,7 +43,9 @@ Rosint/
 │   ├── backoff.test.mjs     # Unit tests for fetchWithBackoff, backoffDelayMs, and retryAfterMs
 │   ├── post-lookup.test.mjs # Unit tests for createPostLookup batching, deduplication, and caching
 │   ├── search-service.test.mjs # Unit tests for createBlocklistClient and Worker proxy handler
-│   └── tracked-users.test.mjs  # Unit tests for tracked user data validation, normalization, and persistence
+│   ├── tracked-users.test.mjs  # Unit tests for tracked user data validation, normalization, and persistence
+│   ├── profile-cache.test.mjs  # Unit tests for profile cache key normalization, merging, LRU eviction, and quota
+│   └── dedupe-posts.test.mjs   # Unit tests for duplicate post URL normalization and grouping
 ├── vite-plugin-tracked-users.js # Dev-only Vite plugin serving /api/tracked backed by data/tracked-users.json
 ├── vite.config.js           # Vite config with React plugin, tracked users plugin, and proxy /api -> http://127.0.0.1:8787
 ├── wrangler.jsonc           # Cloudflare Worker configuration (routing, assets, services binding)
@@ -79,7 +85,7 @@ Rosint/
 
 ## Verification Checklist
 Before submitting changes:
-- [ ] `npm test` passes all 37 tests.
+- [ ] `npm test` passes all 54 tests.
 - [ ] `npm run lint` reports 0 errors (1 warning in `App.jsx` is baseline).
 - [ ] `npm run build` finishes without errors.
 - [ ] Launch `npm run dev` and test:
@@ -118,3 +124,20 @@ Before submitting changes:
   - Blocked users must never be distinguishable from non-existent or empty users.
   - `TrackToggle` is hidden whenever `searchBlocked` is true.
   - Clicking a tracked user who is blocked triggers normal search, which runs the decoy delay without querying archives.
+
+## Profile Cache (Stale-While-Revalidate)
+- **Files Involved:**
+  - `src/lib/profileCache.js`: Core IndexedDB cache manager (`rosint_cache`, store `profiles`), LRU eviction (~1.5 GB cap + `navigator.storage.estimate()` respect), item merging by `id`, and `loadProfileWithCache`.
+  - `src/components/ProfileCache.jsx`: `CacheBanner` (`Cached · updated X ago · Refreshing…` + `Refresh` button) and `ClearCacheButton` footer link.
+  - `tests/profile-cache.test.mjs`: Tests for key normalization, merging by id, LRU eviction, quota estimation, and privacy invariant.
+- **Privacy Invariant:**
+  - Blocklist check (`isBlockedUser`) executes BEFORE any cache read.
+  - If a user is blocked, `deleteCachedProfile` deletes any cached profile entry, and decoy search runs without cache read or write.
+
+## Duplicate Posts Filter
+- **Files Involved:**
+  - `src/lib/dedupePosts.js`: Target URL and media key normalizer (`extractPostMediaKey`), grouping logic keeping newest post visible (`groupDuplicates`).
+  - `src/components/DedupeToggle.jsx`: Toggle checkbox with count indicator, persisted in `localStorage` under `rosint:hide-duplicates`.
+  - `tests/dedupe-posts.test.mjs`: Tests for tracking parameter stripping, media id equivalences (`i.redd.it` vs `preview.redd.it`), self/permalink exclusion, and newest-kept grouping.
+- **Privacy Invariant:**
+  - Purely client-side on loaded post array; zero network requests and never rendered for blocked/decoy searches.

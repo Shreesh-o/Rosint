@@ -3,6 +3,10 @@ import { normalizeUsername } from "./normalizeUsername.js";
 import { dynamicallyBlocked } from "./blocklist.js";
 import { createPostLookup, fetchWithBackoff } from "./postLookup.js";
 import { TrackedUsers, TrackToggle } from "./components/TrackedUsers.jsx";
+import { mergeItemsById, loadProfileWithCache } from "./lib/profileCache.js";
+import { CacheBanner, ClearCacheButton } from "./components/ProfileCache.jsx";
+import { groupDuplicates } from "./lib/dedupePosts.js";
+import { DedupeToggle } from "./components/DedupeToggle.jsx";
 
 // ─── API Config ───────────────────────────────────────────────────────────────
 
@@ -705,7 +709,7 @@ function StatusBadges({ item, type }) {
 
 // ─── Post Card ────────────────────────────────────────────────────────────────
 
-function PostCard({ post, embedded = false }) {
+function PostCard({ post, embedded = false, duplicates = [] }) {
     const [bodyOpen, setBodyOpen]               = useState(false);
     const [comments, setComments]               = useState(null); // null = not fetched
     const [commentsOpen, setCommentsOpen]       = useState(false);
@@ -716,6 +720,11 @@ function PostCard({ post, embedded = false }) {
     const postUrl = `${REDDIT_BASE}${post.permalink}`;
     const hasBody = post.selftext && post.selftext !== "[deleted]" && post.selftext !== "[removed]";
     const status  = getStatus(post, "posts");
+
+    const otherSubs = useMemo(() => {
+        if (!duplicates || duplicates.length === 0) return [];
+        return [...new Set(duplicates.map((d) => d.subreddit_name_prefixed || (d.subreddit ? `r/${d.subreddit}` : null)).filter(Boolean))];
+    }, [duplicates]);
 
     async function handleLoadComments() {
         if (commentsLoading) return;
@@ -811,6 +820,28 @@ function PostCard({ post, embedded = false }) {
                                                 <span className="px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-[#272729] text-[#d7dadc] border border-[#343536]">
                                                 {post.link_flair_text}
                                             </span>
+                                            </>
+                                        )}
+                                        {otherSubs.length > 0 && (
+                                            <>
+                                                <span>·</span>
+                                                <span className="text-[#818384]">
+                                                    also in{" "}
+                                                    {otherSubs.map((sub, idx) => (
+                                                        <span key={sub}>
+                                                            {idx > 0 && ", "}
+                                                            <a
+                                                                href={`https://www.reddit.com/${sub}`}
+                                                                target="_blank"
+                                                                rel="noopener noreferrer"
+                                                                onClick={(e) => e.stopPropagation()}
+                                                                className="hover:text-[#fe5301] transition-colors"
+                                                            >
+                                                                {sub}
+                                                            </a>
+                                                        </span>
+                                                    ))}
+                                                </span>
                                             </>
                                         )}
                                     </div>
@@ -1741,16 +1772,36 @@ function usePaginatedFetch(type) {
         }
     }, [type]);
 
-    const reset = useCallback(async (username, filters = {}) => {
+    const reset = useCallback(async (username, filters = {}, { mergeWith } = {}) => {
         setPage(1);
         setPageStack([]);
         setStoredFilters(filters);
         const data = await _fetch(username, {}, filters);
-        if (data && data.length > 0) {
-            setPageStack([{ firstUtc: data[0].created_utc, lastUtc: data[data.length - 1].created_utc }]);
+        let finalItems = data;
+        if (mergeWith && Array.isArray(mergeWith) && data) {
+            finalItems = mergeItemsById(mergeWith, data);
+            setItems(finalItems.slice(0, LIMIT));
         }
-        return data;
+        if (finalItems && finalItems.length > 0) {
+            const pageOne = finalItems.slice(0, LIMIT);
+            setPageStack([{ firstUtc: pageOne[0].created_utc, lastUtc: pageOne[pageOne.length - 1].created_utc }]);
+        }
+        return finalItems ? finalItems.slice(0, LIMIT) : [];
     }, [_fetch]);
+
+    const hydrate = useCallback((cached) => {
+        if (!cached) return;
+        const pageItems = (cached.items || []).slice(0, LIMIT);
+        setItems(pageItems);
+        setSources(cached.sources || []);
+        if (cached.pageStack && cached.pageStack.length > 0) {
+            setPageStack(cached.pageStack.slice(0, 1));
+        } else if (pageItems.length > 0) {
+            setPageStack([{ firstUtc: pageItems[0].created_utc, lastUtc: pageItems[pageItems.length - 1].created_utc }]);
+        }
+        setPage(1);
+        setError(null);
+    }, []);
 
     const goNext = useCallback(async (username) => {
         const current = pageStack[pageStack.length - 1];
@@ -1792,7 +1843,7 @@ function usePaginatedFetch(type) {
         setArcticDown(false);
     }, []);
 
-    return { items, sources, loading, retrying, error, page, arcticDown, reset, clear, goNext, goPrev };
+    return { items, sources, loading, retrying, error, page, pageStack, arcticDown, reset, clear, goNext, goPrev, hydrate };
 }
 
 // ─── Dino Game (shown during maintenance) ──────────────────────────────────────
@@ -2095,9 +2146,32 @@ export default function App() {
         () => new URLSearchParams(window.location.search).has("dino"), []
     );
     const [searchBlocked, setSearchBlocked] = useState(false);
+    const [cacheInfo, setCacheInfo] = useState(null);
+    const [refreshing, setRefreshing] = useState(false);
+    const [hideDuplicates, setHideDuplicates] = useState(() => {
+        try {
+            const saved = localStorage.getItem("rosint:hide-duplicates");
+            return saved === null ? true : saved === "true";
+        } catch {
+            return true;
+        }
+    });
+
+    const handleToggleDedupe = useCallback((val) => {
+        setHideDuplicates(val);
+        try {
+            localStorage.setItem("rosint:hide-duplicates", String(val));
+        } catch {
+            // Ignore storage errors
+        }
+    }, []);
 
     const posts = usePaginatedFetch("posts");
     const comments = usePaginatedFetch("comments");
+
+    const { visible: deduplicatedPosts, hiddenCount, groups: duplicateGroups } = useMemo(() => {
+        return hideDuplicates ? groupDuplicates(posts.items) : { visible: posts.items, hiddenCount: 0, groups: {} };
+    }, [posts.items, hideDuplicates]);
 
     const arcticIsDown = dinoForced || posts.arcticDown || comments.arcticDown;
 
@@ -2152,19 +2226,23 @@ export default function App() {
     useEffect(() => {
         if (!initialUser || initialSearchStarted.current) return;
         initialSearchStarted.current = true;
-        // The initial state raises the spinner before rendering a deep link,
-        // so UserSummary cannot fetch before the asynchronous block check.
-        isBlockedUser(initialUser).then((blocked) => {
-            if (blocked) { runDecoySearch(); return; }
-            setSearchBlocked(false);
-            setInitialLoading(true);
-            Promise.all([posts.reset(initialUser, {}), comments.reset(initialUser, {})]).then(() => {
-                setInitialLoading(false);
-            });
+        loadProfileWithCache({
+            username: initialUser,
+            filters: {},
+            forceRefresh: false,
+            hasFilters: false,
+            posts,
+            comments,
+            isBlockedUser,
+            runDecoySearch,
+            setSearchBlocked,
+            setInitialLoading,
+            setCacheInfo,
+            setRefreshing,
         });
     }, [initialUser, posts, comments, runDecoySearch]);
 
-    const searchUser = useCallback(async (rawUser, { push = true } = {}) => {
+    const searchUser = useCallback(async (rawUser, { push = true, forceRefresh = false } = {}) => {
         const user = normalizeUsername(rawUser);
         if (!user) return;
         if (push) {
@@ -2175,17 +2253,23 @@ export default function App() {
         setUsername(user);
         setQuery(user);
         setSearched(true);
-        // Same reason as the deep-link path above: raise the spinner before the
-        // async block check so UserSummary can't mount against a blocked name.
-        setInitialLoading(true);
-        if (await isBlockedUser(user)) { await runDecoySearch(); return; }
-        setSearchBlocked(false);
-        setInitialLoading(true);
         const filters = buildFilters();
-        await Promise.all([posts.reset(user, filters), comments.reset(user, filters)]);
+        await loadProfileWithCache({
+            username: user,
+            filters,
+            forceRefresh,
+            hasFilters,
+            posts,
+            comments,
+            isBlockedUser,
+            runDecoySearch,
+            setSearchBlocked,
+            setInitialLoading,
+            setCacheInfo,
+            setRefreshing,
+        });
         setAppliedSubreddit(subreddit.trim());
-        setInitialLoading(false);
-    }, [buildFilters, posts, comments, subreddit, runDecoySearch]);
+    }, [buildFilters, hasFilters, posts, comments, subreddit, runDecoySearch]);
 
     // Browser back/forward: re-run the search in the URL, or return to the landing page
     useEffect(() => {
@@ -2197,6 +2281,8 @@ export default function App() {
                 setSearched(false);
                 setUsername("");
                 setQuery("");
+                setCacheInfo(null);
+                setRefreshing(false);
             }
         };
         window.addEventListener("popstate", onPop);
@@ -2214,15 +2300,21 @@ export default function App() {
     // not just the two search entry points. Retry and Clear both take the name
     // from state and refetch, so without this a blocked search could be turned
     // into a real one by pressing a button that is still on screen.
-    const fetchOrDecoy = useCallback(async (name, filters) => {
-        // Raise the spinner first so Retry shows its loading state while
-        // isBlockedUser runs.
-        setInitialLoading(true);
-        if (await isBlockedUser(name)) { await runDecoySearch(); return; }
-        setSearchBlocked(false);
-        setInitialLoading(true);
-        await Promise.all([posts.reset(name, filters), comments.reset(name, filters)]);
-        setInitialLoading(false);
+    const fetchOrDecoy = useCallback(async (name, filters, forceRefresh = true) => {
+        await loadProfileWithCache({
+            username: name,
+            filters,
+            forceRefresh,
+            hasFilters: Boolean(Object.keys(filters).length),
+            posts,
+            comments,
+            isBlockedUser,
+            runDecoySearch,
+            setSearchBlocked,
+            setInitialLoading,
+            setCacheInfo,
+            setRefreshing,
+        });
     }, [posts, comments, runDecoySearch]);
 
     const handleRetry = useCallback(async () => {
@@ -2525,7 +2617,15 @@ export default function App() {
                 {searched && (searchBlocked || !arcticIsDown) && (
                     <div className="max-w-3xl mx-auto px-4 mt-4 pb-16">
                         {!initialLoading && (
-                            <div className="flex items-center justify-between gap-2 mb-4">
+                            <>
+                                {!searchBlocked && (
+                                    <CacheBanner
+                                        cacheInfo={cacheInfo}
+                                        onRefresh={() => searchUser(query, { push: false, forceRefresh: true })}
+                                        refreshing={refreshing}
+                                    />
+                                )}
+                                <div className="flex items-center justify-between gap-2 mb-4">
                                 <div className="text-[12px] text-[#818384]">
                                     <p>
                                         Results for <span className="text-[#ff4500] font-medium">u/{query}</span>
@@ -2562,6 +2662,7 @@ export default function App() {
                                     </svg>
                                 </button>
                             </div>
+                            </>
                         )}
                         {!initialLoading && showResultsFilters && (
                             <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -2660,16 +2761,25 @@ export default function App() {
                                         Apply
                                     </button>
                                 </div>
-                                <select
-                                    aria-label="Sort order"
-                                    value={sortOrder}
-                                    onChange={(e) => setSortOrder(e.target.value)}
-                                    className="flex-shrink-0 text-[11px] text-[#818384] bg-[#1a1a1b] border border-[#343536] hover:border-[#818384] rounded px-2 py-1 transition-colors focus:outline-none focus:border-[#fe5301] cursor-pointer"
-                                >
-                                    <option value="desc">Newest</option>
-                                    <option value="asc">Oldest</option>
-                                    <option value="top">Top</option>
-                                </select>
+                                <div className="flex items-center gap-3">
+                                    {activeTab === "posts" && (
+                                        <DedupeToggle
+                                            hideDuplicates={hideDuplicates}
+                                            onToggle={handleToggleDedupe}
+                                            hiddenCount={hiddenCount}
+                                        />
+                                    )}
+                                    <select
+                                        aria-label="Sort order"
+                                        value={sortOrder}
+                                        onChange={(e) => setSortOrder(e.target.value)}
+                                        className="flex-shrink-0 text-[11px] text-[#818384] bg-[#1a1a1b] border border-[#343536] hover:border-[#818384] rounded px-2 py-1 transition-colors focus:outline-none focus:border-[#fe5301] cursor-pointer"
+                                    >
+                                        <option value="desc">Newest</option>
+                                        <option value="asc">Oldest</option>
+                                        <option value="top">Top</option>
+                                    </select>
+                                </div>
                             </div>
                         )}
 
@@ -2696,7 +2806,7 @@ export default function App() {
                         ) : (
                             <>
                                 <div className="flex flex-col gap-2">
-                                    {[...active.items]
+                                    {[...(activeTab === "posts" ? deduplicatedPosts : active.items)]
                                         .sort((a, b) =>
                                             sortOrder === "desc" ? b.created_utc - a.created_utc :
                                                 sortOrder === "asc" ? a.created_utc - b.created_utc :
@@ -2705,7 +2815,7 @@ export default function App() {
                                         .map((item) => (
                                             <CardBoundary key={item.id}>
                                                 {activeTab === "posts"
-                                                    ? <PostCard post={item} />
+                                                    ? <PostCard post={item} duplicates={duplicateGroups[item.id]} />
                                                     : <CommentCard comment={item} />}
                                             </CardBoundary>
                                         ))}
@@ -2735,6 +2845,9 @@ export default function App() {
                         {" "}and{" "}
                         <a href="https://pullpush.io/" target="_blank" rel="noopener noreferrer" className="text-[#3a3a3b] hover:underline transition-colors">PullPush</a>.
                     </p>
+                    <div className="flex justify-center mt-1">
+                        <ClearCacheButton />
+                    </div>
                 </footer>
             )}
         </div>
