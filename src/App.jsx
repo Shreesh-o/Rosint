@@ -7,6 +7,17 @@ import { mergeItemsById, loadProfileWithCache } from "./lib/profileCache.js";
 import { CacheBanner, ClearCacheButton } from "./components/ProfileCache.jsx";
 import { groupDuplicates } from "./lib/dedupePosts.js";
 import { DedupeToggle } from "./components/DedupeToggle.jsx";
+import {
+    hasMedia,
+    timeAgo,
+    fullTimestamp,
+    fmtNum,
+    getStatus,
+    statusBorder,
+    statusBorderBase,
+    statusBorderHover,
+} from "./lib/postMedia.js";
+import { MediaPostCard } from "./components/MediaPostCard.jsx";
 
 // ─── API Config ───────────────────────────────────────────────────────────────
 
@@ -272,26 +283,6 @@ function buildUrls(username, type, pagination = {}, dateFilters = {}) {
 
 // ─── Helpers ───────
 
-function timeAgo(utc) {
-    const s = Math.floor(Date.now() / 1000 - utc);
-    if (s < 60) return `${s}s ago`;
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m}m ago`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    const d = Math.floor(h / 24);
-    if (d < 365) return `${d}d ago`;
-    return `${Math.floor(d / 365)}y ago`;
-}
-
-function fullTimestamp(utc) {
-    // Reddit created_utc is UTC seconds; rendered in the viewer's local timezone.
-    return new Date(utc * 1000).toLocaleString(undefined, {
-        dateStyle: "medium",
-        timeStyle: "long",
-    });
-}
-
 // Relative date ("3d ago") with a fast custom tooltip showing the exact time on
 // hover. Uses a scoped group (group/time) so it isn't triggered by the card's
 // own group-hover, and a 75ms fade instead of the browser's slow native title.
@@ -333,12 +324,6 @@ function HoverImageHint({ hint, className = "", children }) {
             )}
         </div>
     );
-}
-
-function fmtNum(n) {
-    if (n == null) return "0";
-    if (Math.abs(n) >= 1000) return `${(n / 1000).toFixed(1)}k`;
-    return String(n);
 }
 
 function fmtBig(n) {
@@ -662,30 +647,6 @@ class CardBoundary extends Component {
 // The reason people use an archive: seeing at a glance whether content was
 // removed by a moderator vs deleted by its author, plus NSFW / distinguished
 // (admin, mod) markers. Drives both the badge row and the card's border tint.
-
-function getStatus(item, type) {
-    const text = type === "posts" ? item.selftext : item.body;
-    return {
-        removed: text === "[removed]" || (type === "posts" && !!item.removed_by_category),
-        deleted: text === "[deleted]" || item.author === "[deleted]",
-    };
-}
-
-// Border color for a card, tinted red when mod-removed and amber when
-// author-deleted so scanning a long list surfaces the interesting rows.
-function statusBorderBase({ removed, deleted }) {
-    if (removed) return "border-[#4a2626]";
-    if (deleted) return "border-[#41371f]";
-    return "border-[#343536]";
-}
-function statusBorderHover({ removed, deleted }) {
-    if (removed) return "hover:border-[#6e3838]";
-    if (deleted) return "hover:border-[#5f4f28]";
-    return "hover:border-[#818384]";
-}
-function statusBorder(status) {
-    return `${statusBorderBase(status)} ${statusBorderHover(status)}`;
-}
 
 const BADGE = "inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide leading-none";
 
@@ -2815,7 +2776,9 @@ export default function App() {
                                         .map((item) => (
                                             <CardBoundary key={item.id}>
                                                 {activeTab === "posts"
-                                                    ? <PostCard post={item} duplicates={duplicateGroups[item.id]} />
+                                                    ? (hasMedia(item)
+                                                        ? <MediaPostCard post={item} duplicates={duplicateGroups[item.id]} />
+                                                        : <PostCard post={item} duplicates={duplicateGroups[item.id]} />)
                                                     : <CommentCard comment={item} />}
                                             </CardBoundary>
                                         ))}
