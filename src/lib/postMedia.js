@@ -243,3 +243,128 @@ export function getPostMedia(post) {
 export function hasMedia(post) {
     return getPostMedia(post) !== null;
 }
+
+// ─── Removed Image Placeholder & Recovery ─────────────────────────────────────
+
+// Known dimensions of removed-image placeholder graphics served by image hosts.
+// New dimensions can be appended here as they are discovered.
+export const KNOWN_REMOVED_PLACEHOLDER_SIZES = Object.freeze([
+    { width: 161, height: 81 },
+    { width: 130, height: 60 },
+]);
+
+export const REMOVED_PLACEHOLDER_ALLOWED_HOSTS = new Set([
+    "i.redd.it",
+    "preview.redd.it",
+    "external-preview.redd.it",
+]);
+
+/**
+ * Checks if a URL points to an allowed image host for placeholder detection:
+ * imgur.com and its subdomains, i.redd.it, preview.redd.it, external-preview.redd.it.
+ *
+ * @param {string} url
+ * @returns {boolean}
+ */
+export function isAllowedPlaceholderHost(url) {
+    if (!url || typeof url !== "string") return false;
+    try {
+        const target = url.startsWith("//") ? `https:${url}` : url;
+        const parsed = new URL(target);
+        const host = parsed.hostname.toLowerCase();
+        if (host === "imgur.com" || host.endsWith(".imgur.com")) return true;
+        if (REMOVED_PLACEHOLDER_ALLOWED_HOSTS.has(host)) return true;
+        return false;
+    } catch {
+        return /(?:^|\/\/)(?:(?:[a-z0-9-]+\.)?imgur\.com|i\.redd\.it|preview\.redd\.it|external-preview\.redd\.it)(?::\d+)?(?:\/|$)/i.test(url);
+    }
+}
+
+/**
+ * Checks if a URL points to an imgur domain (e.g. imgur.com, i.imgur.com).
+ *
+ * @param {string} url
+ * @returns {boolean}
+ */
+export function isImgurHost(url) {
+    if (!url || typeof url !== "string") return false;
+    try {
+        const target = url.startsWith("//") ? `https:${url}` : url;
+        const parsed = new URL(target);
+        const host = parsed.hostname.toLowerCase();
+        return host === "imgur.com" || host.endsWith(".imgur.com");
+    } catch {
+        return /(?:^|\/\/)(?:[a-z0-9-]+\.)?imgur\.com(?::\d+)?(?:\/|$)/i.test(url);
+    }
+}
+
+/**
+ * Detects if an image matches a known "image deleted / removed" placeholder graphic
+ * from an allow-listed image host (imgur, i.redd.it, preview.redd.it, external-preview.redd.it).
+ *
+ * @param {{ url?: string, width?: number, height?: number }} params
+ * @returns {boolean}
+ */
+export function isRemovedImagePlaceholder(params) {
+    if (!params || typeof params !== "object") return false;
+    const { url, width, height } = params;
+    if (!url || typeof url !== "string") return false;
+    if (typeof width !== "number" || typeof height !== "number") return false;
+    if (width <= 0 || height <= 0) return false;
+
+    if (!isAllowedPlaceholderHost(url)) return false;
+
+    return KNOWN_REMOVED_PLACEHOLDER_SIZES.some(
+        (size) => size.width === width && size.height === height
+    );
+}
+
+// Thin alias for backwards compatibility
+export const isImgurRemovedPlaceholder = isRemovedImagePlaceholder;
+
+/**
+ * Attempts to extract a Reddit-hosted backup image URL from the post preview data.
+ * Checks preview.images[0].source.url first, then the largest entry in resolutions.
+ * Skips any URL identical to failedUrl.
+ *
+ * @param {object} post
+ * @param {string} failedUrl
+ * @returns {string | null}
+ */
+export function getRecoveryUrl(post, failedUrl) {
+    if (!post || typeof post !== "object") return null;
+    const cleanedFailed = cleanMediaUrl(failedUrl);
+
+    const previewImage = post.preview?.images?.[0];
+    if (!previewImage || typeof previewImage !== "object") return null;
+
+    // 1. preview.images[0].source.url first
+    const rawSource = previewImage.source?.url;
+    const sourceUrl = cleanMediaUrl(rawSource);
+    if (sourceUrl && sourceUrl !== cleanedFailed) {
+        return sourceUrl;
+    }
+
+    // 2. Largest entry in preview.images[0].resolutions
+    const resolutions = previewImage.resolutions;
+    if (Array.isArray(resolutions) && resolutions.length > 0) {
+        const sorted = [...resolutions].sort((a, b) => {
+            const areaA = (typeof a?.width === "number" && typeof a?.height === "number")
+                ? a.width * a.height
+                : (a?.width || 0);
+            const areaB = (typeof b?.width === "number" && typeof b?.height === "number")
+                ? b.width * b.height
+                : (b?.width || 0);
+            return areaB - areaA;
+        });
+
+        for (const res of sorted) {
+            const resUrl = cleanMediaUrl(res?.url);
+            if (resUrl && resUrl !== cleanedFailed) {
+                return resUrl;
+            }
+        }
+    }
+
+    return null;
+}

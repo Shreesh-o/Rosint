@@ -103,7 +103,11 @@ Before submitting changes:
 - **Files:** `src/lib/postMedia.js`, `src/components/MediaPostCard.jsx`, `tests/media-post.test.mjs`
 - **Purpose:** Mobile dark-mode presentation for posts with images, galleries, and videos, with lazy/async loading, `preload="none"`, and broken-media fallback placeholders.
 - **Key Rule:** `hasMedia(post)` drives conditional rendering: media posts render with `MediaPostCard`; text posts and plain link posts keep the original `PostCard`.
-- **Key Functions:** `hasMedia`, `getPostMedia`, `cleanMediaUrl`, `fmtNum`, `timeAgo`, `getStatus`, `statusBorder`.
+- **Key Functions:** `hasMedia`, `getPostMedia`, `cleanMediaUrl`, `fmtNum`, `timeAgo`, `getStatus`, `statusBorder`, `isRemovedImagePlaceholder`, `isAllowedPlaceholderHost`, `getRecoveryUrl`.
+- **Removed Image Placeholder Detection:** Detects host-served "image removed / deleted" graphics via `isRemovedImagePlaceholder({ url, width, height })` in `onLoad` across single images, recovery previews, and gallery slides.
+  - **Allowed Hosts:** `imgur.com` and its subdomains, `i.redd.it`, `preview.redd.it`, `external-preview.redd.it`.
+  - **Known Sizes:** Maintained in `KNOWN_REMOVED_PLACEHOLDER_SIZES` in `src/lib/postMedia.js` (currently `161x81` and `130x60`). To add a newly discovered placeholder size, append `{ width: W, height: H }` to `KNOWN_REMOVED_PLACEHOLDER_SIZES`.
+- **Media Fallback Chain:** Failed images attempt Reddit-hosted preview recovery via `getRecoveryUrl` (annotated with "Original deleted on host · showing Reddit preview"). If recovery fails, or if the recovery image is itself a removed placeholder, the card transitions directly to the final failed state showing "Image was deleted (placeholder only)" while keeping the "Open original" link.
 - **Privacy Rule:** Pure presentation formatting on already loaded posts. Zero network queries; never rendered for blocked/decoy searches.
 
 ### 4. Tracked Users

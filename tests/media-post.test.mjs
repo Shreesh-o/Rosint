@@ -9,6 +9,9 @@ import {
     fullTimestamp,
     getStatus,
     statusBorder,
+    isRemovedImagePlaceholder,
+    isImgurRemovedPlaceholder,
+    getRecoveryUrl,
 } from "../src/lib/postMedia.js";
 
 test("cleanMediaUrl: decodes HTML entities and trims whitespace", () => {
@@ -188,4 +191,182 @@ test("formatting helpers: fmtNum, timeAgo, fullTimestamp, getStatus, statusBorde
     assert.ok(statusBorder({ removed: true, deleted: false }).includes("border-[#4a2626]"));
     assert.ok(statusBorder({ removed: false, deleted: true }).includes("border-[#41371f]"));
     assert.ok(statusBorder({ removed: false, deleted: false }).includes("border-[#343536]"));
+});
+
+test("isRemovedImagePlaceholder: sizes 161x81 and 130x60 on each allowed host -> true; unrelated host -> false; different sizes -> false; missing/zero inputs -> false", () => {
+    const allowedHosts = [
+        "https://imgur.com/image.png",
+        "https://i.imgur.com/image.png",
+        "https://sub.imgur.com/image.png",
+        "https://i.redd.it/image.png",
+        "https://preview.redd.it/image.png",
+        "https://external-preview.redd.it/image.png",
+        "//i.redd.it/image.png",
+    ];
+
+    const knownSizes = [
+        { width: 161, height: 81 },
+        { width: 130, height: 60 },
+    ];
+
+    // 1. Each allowed host with each known size -> true
+    for (const url of allowedHosts) {
+        for (const size of knownSizes) {
+            assert.equal(
+                isRemovedImagePlaceholder({ url, width: size.width, height: size.height }),
+                true,
+                `Expected true for ${url} at ${size.width}x${size.height}`
+            );
+        }
+    }
+
+    // Also verify thin alias isImgurRemovedPlaceholder
+    assert.equal(
+        isImgurRemovedPlaceholder({ url: "https://i.imgur.com/image.png", width: 161, height: 81 }),
+        true
+    );
+    assert.equal(
+        isImgurRemovedPlaceholder({ url: "https://i.redd.it/image.png", width: 130, height: 60 }),
+        true
+    );
+
+    // 2. The same sizes on an unrelated host -> false
+    const unrelatedHosts = [
+        "https://example.com/banner.jpg",
+        "https://reddit.com/static/pixel.png",
+        "https://notimgur.com/deleted.jpg",
+        "https://fakei.redd.it/pic.png",
+        "https://wikimedia.org/pic.jpg",
+    ];
+    for (const url of unrelatedHosts) {
+        for (const size of knownSizes) {
+            assert.equal(
+                isRemovedImagePlaceholder({ url, width: size.width, height: size.height }),
+                false,
+                `Expected false for unrelated host ${url} at ${size.width}x${size.height}`
+            );
+        }
+    }
+
+    // 3. An allowed host with a different size -> false
+    const wrongSizes = [
+        { width: 480, height: 360 },
+        { width: 130, height: 61 },
+        { width: 129, height: 60 },
+        { width: 161, height: 82 },
+        { width: 160, height: 81 },
+        { width: 800, height: 600 },
+    ];
+    for (const size of wrongSizes) {
+        assert.equal(
+            isRemovedImagePlaceholder({ url: "https://i.redd.it/image.png", width: size.width, height: size.height }),
+            false,
+            `Expected false for allowed host at ${size.width}x${size.height}`
+        );
+        assert.equal(
+            isRemovedImagePlaceholder({ url: "https://i.imgur.com/image.png", width: size.width, height: size.height }),
+            false,
+            `Expected false for allowed host at ${size.width}x${size.height}`
+        );
+    }
+
+    // 4. Missing or zero inputs -> false
+    assert.equal(isRemovedImagePlaceholder({ url: "https://i.redd.it/image.png", width: 0, height: 0 }), false);
+    assert.equal(isRemovedImagePlaceholder({ url: "https://i.redd.it/image.png", width: 130, height: 0 }), false);
+    assert.equal(isRemovedImagePlaceholder({ url: "https://i.redd.it/image.png", width: 0, height: 60 }), false);
+    assert.equal(isRemovedImagePlaceholder({ url: "https://i.imgur.com/image.png", width: 0, height: 81 }), false);
+    assert.equal(isRemovedImagePlaceholder({}), false);
+    assert.equal(isRemovedImagePlaceholder(null), false);
+    assert.equal(isRemovedImagePlaceholder(undefined), false);
+    assert.equal(isRemovedImagePlaceholder({ url: "", width: 130, height: 60 }), false);
+    assert.equal(isRemovedImagePlaceholder({ url: "not-a-valid-url", width: 130, height: 60 }), false);
+    assert.equal(isRemovedImagePlaceholder({ url: "https://i.redd.it/image.png" }), false);
+    assert.equal(isRemovedImagePlaceholder({ url: "https://i.redd.it/image.png", width: "130", height: "60" }), false);
+    assert.equal(isRemovedImagePlaceholder({ url: "https://i.redd.it/image.png", width: null, height: 60 }), false);
+    assert.equal(isRemovedImagePlaceholder({ url: "https://i.redd.it/image.png", width: 130, height: undefined }), false);
+});
+
+test("getRecoveryUrl: uses preview source, decodes entities, skips failed URL, null when no preview, picks largest resolution", () => {
+    // 1. Uses the preview source
+    const postWithSource = {
+        preview: {
+            images: [
+                {
+                    source: { url: "https://preview.redd.it/recovery_source.jpg" },
+                },
+            ],
+        },
+    };
+    assert.equal(
+        getRecoveryUrl(postWithSource, "https://i.imgur.com/failed.jpg"),
+        "https://preview.redd.it/recovery_source.jpg"
+    );
+
+    // 2. Decodes HTML entities in preview source URL
+    const postWithEntities = {
+        preview: {
+            images: [
+                {
+                    source: { url: "https://preview.redd.it/recovery.jpg?width=1080&amp;s=abc123&#38;auto=webp" },
+                },
+            ],
+        },
+    };
+    assert.equal(
+        getRecoveryUrl(postWithEntities, "https://i.imgur.com/failed.jpg"),
+        "https://preview.redd.it/recovery.jpg?width=1080&s=abc123&auto=webp"
+    );
+
+    // 3. Skips a URL equal to the failed one and falls back to largest resolution
+    const postWithSameSource = {
+        preview: {
+            images: [
+                {
+                    source: { url: "https://preview.redd.it/already_failed.jpg" },
+                    resolutions: [
+                        { url: "https://preview.redd.it/thumb.jpg", width: 108, height: 60 },
+                        { url: "https://preview.redd.it/largest_res.jpg", width: 960, height: 540 },
+                        { url: "https://preview.redd.it/mid_res.jpg", width: 480, height: 270 },
+                    ],
+                },
+            ],
+        },
+    };
+    assert.equal(
+        getRecoveryUrl(postWithSameSource, "https://preview.redd.it/already_failed.jpg"),
+        "https://preview.redd.it/largest_res.jpg"
+    );
+
+    // 4. Returns null when there is no preview (or all options equal failed URL)
+    assert.equal(getRecoveryUrl({}, "https://i.imgur.com/failed.jpg"), null);
+    assert.equal(getRecoveryUrl(null, "https://i.imgur.com/failed.jpg"), null);
+    assert.equal(getRecoveryUrl({ preview: null }, "https://i.imgur.com/failed.jpg"), null);
+    assert.equal(getRecoveryUrl({ preview: { images: [] } }, "https://i.imgur.com/failed.jpg"), null);
+    assert.equal(
+        getRecoveryUrl(
+            { preview: { images: [{ source: { url: "https://same.jpg" }, resolutions: [] }] } },
+            "https://same.jpg"
+        ),
+        null
+    );
+
+    // 5. Picks largest resolution as secondary option when source is missing
+    const postWithResolutionsOnly = {
+        preview: {
+            images: [
+                {
+                    source: null,
+                    resolutions: [
+                        { url: "https://preview.redd.it/small.jpg", width: 216, height: 120 },
+                        { url: "https://preview.redd.it/big.jpg?amp=1&amp;s=xyz", width: 1080, height: 600 },
+                        { url: "https://preview.redd.it/mid.jpg", width: 640, height: 360 },
+                    ],
+                },
+            ],
+        },
+    };
+    assert.equal(
+        getRecoveryUrl(postWithResolutionsOnly, "https://i.imgur.com/failed.jpg"),
+        "https://preview.redd.it/big.jpg?amp=1&s=xyz"
+    );
 });

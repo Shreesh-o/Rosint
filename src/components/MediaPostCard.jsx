@@ -7,6 +7,9 @@ import {
     timeAgo,
     fullTimestamp,
     REDDIT_BASE,
+    isRemovedImagePlaceholder,
+    isAllowedPlaceholderHost,
+    getRecoveryUrl,
 } from "../lib/postMedia.js";
 
 const BADGE = "inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide leading-none";
@@ -41,13 +44,13 @@ function StatusBadges({ item }) {
     );
 }
 
-function MediaPlaceholder({ originalUrl }) {
+function MediaPlaceholder({ originalUrl, message = "Media unavailable" }) {
     return (
         <div className="flex flex-col items-center justify-center py-10 px-4 text-center text-[#818384] select-none">
             <svg className="w-6 h-6 mb-1.5 opacity-50" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24" aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
             </svg>
-            <span className="text-xs font-medium text-[#a8a8a9]">Media unavailable</span>
+            <span className="text-xs font-medium text-[#a8a8a9]">{message}</span>
             {originalUrl && (
                 <a
                     href={originalUrl}
@@ -66,20 +69,36 @@ function MediaPlaceholder({ originalUrl }) {
 function GalleryViewer({ items = [], title = "", originalUrl = "" }) {
     const [idx, setIdx] = useState(0);
     const [failedSlideIds, setFailedSlideIds] = useState(() => new Set());
+    const [deletedSlideIds, setDeletedSlideIds] = useState(() => new Set());
 
     const current = items[idx] || items[0];
     if (!current) return null;
 
-    const isFailed = failedSlideIds.has(current.id || idx);
+    const currentId = current.id || idx;
+    const isFailed = failedSlideIds.has(currentId);
+    const isDeleted = deletedSlideIds.has(currentId);
 
-    const handleSlideError = () => {
-        setFailedSlideIds((prev) => new Set(prev).add(current.id || idx));
+    const handleSlideError = (deleted = false) => {
+        setFailedSlideIds((prev) => new Set(prev).add(currentId));
+        if (deleted) {
+            setDeletedSlideIds((prev) => new Set(prev).add(currentId));
+        }
+    };
+
+    const handleSlideLoad = (e) => {
+        const { naturalWidth, naturalHeight } = e.currentTarget;
+        if (isRemovedImagePlaceholder({ url: current.url, width: naturalWidth, height: naturalHeight })) {
+            handleSlideError(true);
+        }
     };
 
     return (
         <div className="relative w-full min-h-[220px] flex items-center justify-center">
             {isFailed ? (
-                <MediaPlaceholder originalUrl={current.url || originalUrl} />
+                <MediaPlaceholder
+                    originalUrl={current.url || originalUrl}
+                    message={isDeleted ? "Image was deleted (placeholder only)" : "Media unavailable"}
+                />
             ) : (
                 <img
                     src={current.url}
@@ -88,7 +107,8 @@ function GalleryViewer({ items = [], title = "", originalUrl = "" }) {
                     decoding="async"
                     onClick={() => window.open(current.url, "_blank", "noopener,noreferrer")}
                     className="w-full max-h-[550px] object-contain cursor-zoom-in"
-                    onError={handleSlideError}
+                    onLoad={handleSlideLoad}
+                    onError={() => handleSlideError(false)}
                 />
             )}
 
@@ -134,9 +154,46 @@ function GalleryViewer({ items = [], title = "", originalUrl = "" }) {
 }
 
 export function MediaPostCard({ post, duplicates = [] }) {
-    const [mediaError, setMediaError] = useState(false);
+    const [videoError, setVideoError] = useState(false);
+    const [imageStage, setImageStage] = useState("initial"); // "initial" | "recovery" | "failed"
+    const [recoveryUrl, setRecoveryUrl] = useState(null);
+    const [deletedOnHost, setDeletedOnHost] = useState(false);
     const status = getStatus(post, "posts");
     const media = getPostMedia(post);
+
+    const handleImageFailure = ({ isPlaceholder = false } = {}) => {
+        const currentUrl = imageStage === "recovery" ? recoveryUrl : media?.url;
+        const isKnownHost = isPlaceholder || isAllowedPlaceholderHost(currentUrl) || isAllowedPlaceholderHost(media?.url) || isAllowedPlaceholderHost(media?.originalUrl);
+        if (isKnownHost) {
+            setDeletedOnHost(true);
+        }
+
+        if (imageStage === "initial") {
+            const rec = getRecoveryUrl(post, currentUrl);
+            if (rec && rec !== currentUrl) {
+                setDeletedOnHost(true);
+                setRecoveryUrl(rec);
+                setImageStage("recovery");
+            } else {
+                setImageStage("failed");
+            }
+        } else {
+            setDeletedOnHost(true);
+            setImageStage("failed");
+        }
+    };
+
+    const handleImageLoad = (e) => {
+        const { naturalWidth, naturalHeight } = e.currentTarget;
+        const currentUrl = imageStage === "recovery" ? recoveryUrl : media?.url;
+        if (isRemovedImagePlaceholder({ url: currentUrl, width: naturalWidth, height: naturalHeight })) {
+            handleImageFailure({ isPlaceholder: true });
+        }
+    };
+
+    const handleImageError = () => {
+        handleImageFailure({ isPlaceholder: false });
+    };
 
     const postUrl = post.permalink
         ? `${REDDIT_BASE}${post.permalink}`
@@ -241,18 +298,29 @@ export function MediaPostCard({ post, duplicates = [] }) {
             {media && (
                 <div className="w-full min-h-[220px] rounded-[16px] overflow-hidden bg-[#111112] border border-[#272729] mb-3 flex items-center justify-center relative">
                     {media.type === "image" && (
-                        mediaError ? (
-                            <MediaPlaceholder originalUrl={media.originalUrl || media.url} />
-                        ) : (
-                            <img
-                                src={media.url}
-                                alt={post.title || ""}
-                                loading="lazy"
-                                decoding="async"
-                                onClick={() => window.open(media.url, "_blank", "noopener,noreferrer")}
-                                className="w-full max-h-[550px] object-contain cursor-zoom-in"
-                                onError={() => setMediaError(true)}
+                        imageStage === "failed" ? (
+                            <MediaPlaceholder
+                                originalUrl={media.originalUrl || media.url}
+                                message={deletedOnHost ? "Image was deleted (placeholder only)" : "Media unavailable"}
                             />
+                        ) : (
+                            <div className="w-full flex flex-col items-center justify-center">
+                                <img
+                                    src={imageStage === "recovery" ? recoveryUrl : media.url}
+                                    alt={post.title || ""}
+                                    loading="lazy"
+                                    decoding="async"
+                                    onClick={() => window.open(imageStage === "recovery" ? recoveryUrl : media.url, "_blank", "noopener,noreferrer")}
+                                    className="w-full max-h-[550px] object-contain cursor-zoom-in"
+                                    onLoad={handleImageLoad}
+                                    onError={handleImageError}
+                                />
+                                {imageStage === "recovery" && (
+                                    <div className="py-1.5 px-3 text-[11px] text-[#818384] text-center italic select-none">
+                                        Original deleted on host · showing Reddit preview
+                                    </div>
+                                )}
+                            </div>
                         )
                     )}
                     {media.type === "gallery" && (
@@ -263,7 +331,7 @@ export function MediaPostCard({ post, duplicates = [] }) {
                         />
                     )}
                     {media.type === "video" && (
-                        mediaError ? (
+                        videoError ? (
                             <MediaPlaceholder originalUrl={media.originalUrl || media.url} />
                         ) : (
                             <video
@@ -273,7 +341,7 @@ export function MediaPostCard({ post, duplicates = [] }) {
                                 playsInline
                                 preload="none"
                                 className="w-full max-h-[550px] object-contain bg-black"
-                                onError={() => setMediaError(true)}
+                                onError={() => setVideoError(true)}
                             />
                         )
                     )}
