@@ -7,7 +7,7 @@ Rosint is a client-side Reddit intelligence tool that queries independent public
 - **Runtime:** Node.js ≥ 24 (`v26.13.1` verified)
 - **Install:** `npm ci` (configured with `.npmrc` `legacy-peer-deps=true`)
 - **Dev Server:** `npm run dev` (starts Vite on `http://localhost:5173`)
-- **Test:** `npm test` (`node --test tests/*.test.mjs` — 63 unit tests)
+- **Test:** `npm test` (`node --test tests/*.test.mjs` — 82 unit tests)
 - **Lint:** `npm run lint` (`eslint .` — 0 errors, 1 known warning)
 - **Build:** `npm run build` (Vite production build to `dist/`)
 - **Preview:** `npm run preview` (previews `dist/`)
@@ -17,7 +17,7 @@ Rosint is a client-side Reddit intelligence tool that queries independent public
 ```
 Rosint/
 ├── src/
-│   ├── main.jsx             # React DOM entry point, Vercel analytics, canonical domain redirect
+│   ├── main.jsx             # React DOM entry point, canonical domain redirect
 │   ├── App.jsx              # Main UI monolith: search state, archive queries, result cards, charts, dino game
 │   ├── blocklist.js         # Removal service client (createBlocklistClient) with 30s cache & fail-closed fallback
 │   ├── normalizeUsername.js # Cleans usernames (strips u/, URLs, @, slashes); shared by UI and CLI scripts
@@ -71,12 +71,12 @@ Rosint/
 ## Gotchas & Fragile Areas
 - **`App.jsx` Monolith:** Contains over 2,700 lines. The static array `const BLOCKED_HASHES = [...]` must retain its exact marker syntax because `scripts/block.mjs` parses and rewrites it via string matching.
 - **Privacy / Decoy Invariant:** Never fire archive API queries or read/write cache for blocked accounts. `UserSummary` and `TrackToggle` are suppressed when `searchBlocked` is true.
-- **Shared Helpers & Duplication:** Formatting helpers (`timeAgo`, `fullTimestamp`, `fmtNum`, `getStatus`, `statusBorder`) now live in `src/lib/postMedia.js` and are imported by `App.jsx` to prevent duplication while keeping `App.jsx` exporting only components (preserving Vite Fast Refresh). The duplication of ARCTIC/PULLPUSH URLs and `safeFetch` with `scripts/lib/archive.mjs`, and unused `@neon/*` dependencies, remain known debt.
+- **Shared Helpers & Duplication:** Formatting helpers (`timeAgo`, `fullTimestamp`, `fmtNum`, `getStatus`, `statusBorder`) now live in `src/lib/postMedia.js` and are imported by `App.jsx` to prevent duplication while keeping `App.jsx` exporting only components (preserving Vite Fast Refresh). The duplication of ARCTIC/PULLPUSH URLs and `safeFetch` with `scripts/lib/archive.mjs` remains known debt.
 - **Client-Side Sorting & Pagination:** Sorting (Newest, Oldest, Top) re-sorts the current page (≤100 items), not the complete archive dataset. Pagination uses timestamp cursors (`before=` / `after=`).
 
 ## Verification Checklist
 Before submitting changes:
-- [ ] `npm test` passes all 63 tests.
+- [ ] `npm test` passes all 82 tests.
 - [ ] `npm run lint` reports 0 errors (1 warning in `App.jsx` is baseline).
 - [ ] `npm run build` finishes without errors.
 - [ ] Launch `npm run dev` and test:
